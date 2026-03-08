@@ -18,7 +18,7 @@ The codes of 'wprf_2_3_intersection.cpp', and 'wprf_2_3_quarter.cpp' are used to
 
 **Software:** g++
 
-**Estimated time:** each instance costs less than 2 hours, most instances are fast
+**Estimated time:**, when NN is small, the instances are fast. When NN is larger such as 64, the codes may run for hours. 
 
 ===================================================================
 

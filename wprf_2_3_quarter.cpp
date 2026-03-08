@@ -586,6 +586,10 @@ int main()
     uniform_int_distribution<F2> dis(0, 1);
     uniform_int_distribution<F3> disF3(0, 2);
 
+    cout << "The parameter NN = " << NN << ";" << "lambda = " << lambda << endl;
+
+    cout << "Execute 100 times of tests...The data in the paper is the average value of the 100 tests..." << endl;
+
     cout << "Execute 100 times of tests..." << endl;
 
     while ( true )
