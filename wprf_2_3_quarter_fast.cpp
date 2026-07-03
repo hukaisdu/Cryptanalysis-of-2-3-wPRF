@@ -7,6 +7,8 @@
 #include<cstring>
 #include<cstdlib>
 #include<thread>
+#include<atomic>
+#include<mutex>
 
 using namespace std;
 
@@ -1400,6 +1402,8 @@ int main(int argc, char** argv)
     cout << "Execute " << TESTNUM << " times of tests...The data in the paper is the average value of the " << TESTNUM << " tests..." << endl;
 
     vector<TrialResult> results( TESTNUM );
+    std::atomic<int> progress_done( 0 );
+    std::mutex progress_mtx;
     auto worker = [&]( int lo, int hi )
     {
         for ( int i = lo; i < hi; i++ )
@@ -1407,6 +1411,14 @@ int main(int argc, char** argv)
             std::seed_seq sq{ (unsigned int)seed, (unsigned int)i };
             mt19937 gen( sq );
             results[i] = run_trial( gen );
+            int c = ++progress_done;
+            std::lock_guard<std::mutex> lk( progress_mtx );
+            const int barWidth = 50;
+            int pos = barWidth * c / TESTNUM;
+            std::string bar = "[";
+            for ( int p = 0; p < barWidth; ++p ) bar += ( p < pos ) ? '=' : ' ';
+            bar += "] " + std::to_string( 100 * c / TESTNUM ) + "%  (" + std::to_string( c ) + "/" + std::to_string( TESTNUM ) + ")";
+            std::cerr << "\r" << bar << std::flush;
         }
     };
     if ( nthreads <= 1 )
@@ -1422,6 +1434,7 @@ int main(int argc, char** argv)
         }
         for ( auto& th : pool ) th.join();
     }
+    std::cerr << std::endl;
 
     long long S1 = 0, S2 = 0, W1_before = 0, W1 = 0, W2 = 0, E = 0; int SUC = 0;
     for ( int i = 0; i < TESTNUM; i++ )
