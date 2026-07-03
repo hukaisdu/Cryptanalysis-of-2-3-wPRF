@@ -1,3 +1,12 @@
 .DS_Store
+
+# compiled binaries
 wprf_2_3_intersection
 wprf_2_3_quarter
+wprf_2_3_intersection_fast
+wprf_2_3_quarter_fast
+
+# not part of the public artifact
+12.txt
+*-log.md
+fse2026artifact-paper12-accepted_paper.pdf

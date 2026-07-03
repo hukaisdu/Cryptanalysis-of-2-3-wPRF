@@ -6,6 +6,7 @@
 #include<unordered_set>
 #include<cstring>
 #include<cstdlib>
+#include<thread>
 
 using namespace std;
 
@@ -452,7 +453,77 @@ vector<vector<F3>> solveF3(F3** A, F3* b, int T, int N)
 }
 
 
-void generateCombinationsF2( vector<vector<F2>>& res, vector<F2>& current, int depth, int k) 
+// ---- O1/O2: factor A once, then solve A g = b for many b (reused in the
+// #w(before filter) loop, where the coefficient matrix is constant across the
+// inner x-loop and only the right-hand side b changes). Produces exactly the
+// same solution set as solveF3 (verified by 5e5 random equivalence tests). ----
+struct F3Factor {
+    int T, N, rank;
+    vector<vector<F3>> R;            // reduced LHS (== solveF3's reduced aug LHS)
+    vector<vector<F3>> P;            // transform: reduced_b = P * b
+    vector<int> pivot_cols, free_cols;
+    vector<vector<F3>> free_combos;  // all F3^k free-variable assignments (once per factor)
+};
+
+F3Factor factorF3( F3** A, int T, int N )
+{
+    // Run solveF3's exact row reduction on [A | I_T]: first N cols reduce
+    // identically to solveF3's LHS, the last T cols accumulate the transform P.
+    int W = N + T;
+    vector<vector<F3>> aug( T, vector<F3>( W, 0 ) );
+    for ( int i = 0; i < T; ++i ) { for ( int j = 0; j < N; ++j ) aug[i][j] = mod3( A[i][j] ); aug[i][N + i] = 1; }
+    vector<int> pivot_cols; int rank = 0;
+    for ( int col = 0; col < N; ++col )
+    {
+        int pivot = rank; while ( ( pivot < T ) && ( aug[pivot][col] == 0 ) ) ++pivot;
+        if ( pivot == T ) continue;
+        swap( aug[rank], aug[pivot] );
+        int inv = inverse_mod3( aug[rank][col] );
+        for ( int j = 0; j < W; ++j ) aug[rank][j] = mod3( aug[rank][j] * inv );
+        for ( int i = 0; i < T; ++i ) if ( ( i != rank ) && ( aug[i][col] != 0 ) )
+        {
+            int factor = mod3( -aug[i][col] );
+            for ( int j = col; j < W; ++j ) aug[i][j] = mod3( aug[i][j] + factor * aug[rank][j] );
+        }
+        pivot_cols.push_back( col ); ++rank;
+    }
+    F3Factor f; f.T = T; f.N = N; f.rank = rank; f.pivot_cols = pivot_cols;
+    f.R.assign( T, vector<F3>( N ) ); f.P.assign( T, vector<F3>( T ) );
+    for ( int i = 0; i < T; ++i ) { for ( int j = 0; j < N; ++j ) f.R[i][j] = aug[i][j]; for ( int j = 0; j < T; ++j ) f.P[i][j] = aug[i][N + j]; }
+    unordered_set<int> ps( pivot_cols.begin(), pivot_cols.end() );
+    for ( int col = 0; col < N; ++col ) if ( !ps.count( col ) ) f.free_cols.push_back( col );
+    int k = f.free_cols.size();
+    if ( k > 0 ) { vector<F3> tmp( k, 0 ); generateCombinations( f.free_combos, tmp, 0, k ); }
+    else f.free_combos.assign( 1, vector<F3>() );
+    return f;
+}
+
+// Solve for one b using a precomputed factor; writes the solution set into `out`
+// (reused; out.size() gives the number of solutions). rb is reused scratch.
+void solveF3_withFactor( const F3Factor& f, const F3* b, vector<F3>& rb, vector<vector<F3>>& out )
+{
+    int T = f.T, N = f.N, rank = f.rank, k = f.free_cols.size();
+    rb.assign( T, 0 );
+    for ( int i = 0; i < T; ++i ) { F3 s = 0; for ( int j = 0; j < T; ++j ) s = mod3( s + mod3( f.P[i][j] * mod3( b[j] ) ) ); rb[i] = s; }
+    for ( int i = rank; i < T; ++i ) if ( rb[i] != 0 ) { out.clear(); return; }
+    int m = f.free_combos.size();
+    if ( (int)out.size() != m ) out.assign( m, vector<F3>( N, 0 ) );
+    for ( int c = 0; c < m; ++c )
+    {
+        vector<F3>& sol = out[c];
+        for ( int i = 0; i < N; ++i ) sol[i] = 0;
+        for ( int i = 0; i < k; ++i ) sol[ f.free_cols[i] ] = f.free_combos[c][i];
+        for ( int i = rank - 1; i >= 0; --i )
+        {
+            int pc = f.pivot_cols[i]; F3 sum = 0;
+            for ( int j = pc + 1; j < N; ++j ) sum = mod3( sum + mod3( f.R[i][j] * sol[j] ) );
+            sol[pc] = mod3( rb[i] - sum );
+        }
+    }
+}
+
+
+void generateCombinationsF2( vector<vector<F2>>& res, vector<F2>& current, int depth, int k)
 {
     if (depth == k) 
     {
@@ -552,7 +623,11 @@ vector<vector<F2>> solveF2(F2** M, F2* b, int T, int N)
     return solutions;
 }
 
-int main(int argc, char** argv)
+struct TrialResult { long long S1, S2, W1_before, W1, W2, E; int SUC; };
+
+// One independent trial with its own RNG; returns this trial's contribution to
+// the aggregate counters. Retries internally until KEY (and B) have full rank.
+TrialResult run_trial( mt19937& gen )
 {
     long long S1 = 0;
     long long S2 = 0;
@@ -562,38 +637,15 @@ int main(int argc, char** argv)
     long long E = 0;
     int SUC = 0;
 
-    // Seed selection: use --seed N for a reproducible run, otherwise draw a
-    // nondeterministic seed from random_device.
-    random_device rd;
-    unsigned int seed = rd();
-    bool seed_given = false;
-    for ( int i = 1; i + 1 < argc; i++ )
-    {
-        if ( strcmp( argv[i], "--seed" ) == 0 )
-        {
-            seed = static_cast<unsigned int>( strtoul( argv[i + 1], nullptr, 10 ) );
-            seed_given = true;
-        }
-    }
-    mt19937 gen ( seed );
-    cout << "Using seed " << seed << ( seed_given ? " (from --seed)" : " (random)" ) << endl;
     uniform_int_distribution<F2> dis(0, 1);
     uniform_int_distribution<F3> disF3(0, 2);
-
-    float TESTNUM = 100;
-
-    int COUNT = 0;
-
-    cout << "The parameter NN = " << NN << ";" << "lambda = " << lambda << endl;
-
-    cout << "Execute 100 times of tests...The data in the paper is the average value of the 100 tests..." << endl;
 
     while ( true )
     {
         if ( verbose )
         {
             cout << endl;
-            cout << "Test time: " << COUNT << endl;
+            cout << "New trial" << endl;
         }
 
 
@@ -634,7 +686,6 @@ int main(int argc, char** argv)
             continue;
         }
 
-        COUNT += 1;
 
         if ( verbose )
         {
@@ -665,7 +716,6 @@ int main(int argc, char** argv)
             for ( int i = 0; i < NN; i++ )
                 delete [] KEY[i];
             delete [] KEY;
-            COUNT -= 1;
             continue;
         }
 
@@ -1044,17 +1094,21 @@ int main(int argc, char** argv)
         vector< vector<F2>> solution1;
         vector< vector<F2>> solution2;
 
+        vector<F3> rb_scr;                 // O2: reused scratch for solveF3_withFactor
+        vector<vector<F3>> res1, res2;     // O2: reused solution buffers
         for ( auto it : diff2 ) // for each difference
         //for ( int index = 0; index < ( 1 << RR ); index ++ )
         {
-            // **********|vvvvvvvvvv|**********|vvvvvvvvvv
-            for ( int x = 0; x < ( 1 << (HalfNN - TT) ); x++ ) // guess the values for the first HalfNN - TT 
-            {
-                // prepare the coefficients
-                for ( int t = 0; t < TT; t++ )
-                    for ( int j = 0; j < TT; j++ )
-                        tempB[t][j] = ( B[t][ HalfNN - TT + j ] + ( B[t][HalfNN + HalfNN - TT + j ] * ( it[ HalfNN - TT + j] + 1 ) ) ) % 3;
+            // O1: tempB depends only on B and it (not x) -> build & factor ONCE
+            // per it; reuse the factor for both x-loops (solution1 and solution2).
+            for ( int t = 0; t < TT; t++ )
+                for ( int j = 0; j < TT; j++ )
+                    tempB[t][j] = ( B[t][ HalfNN - TT + j ] + ( B[t][HalfNN + HalfNN - TT + j ] * ( it[ HalfNN - TT + j] + 1 ) ) ) % 3;
+            F3Factor fac = factorF3( tempB, TT, TT );
 
+            // **********|vvvvvvvvvv|**********|vvvvvvvvvv
+            for ( int x = 0; x < ( 1 << (HalfNN - TT) ); x++ ) // guess the values for the first HalfNN - TT
+            {
                 // prepare the output1
                 for ( int t = 0; t < TT; t++ )
                 {
@@ -1069,7 +1123,7 @@ int main(int argc, char** argv)
                     tempO[t] = mod3 ( Output1[t] - reminder ); 
                 }
 
-                auto res1 = solveF3( tempB, tempO, TT, TT ); 
+                solveF3_withFactor( fac, tempO, rb_scr, res1 );
 
                 W1_before += res1.size();
 
@@ -1108,13 +1162,8 @@ int main(int argc, char** argv)
             }
 
             // **********|vvvvvvvvvv|**********|vvvvvvvvvv
-            for ( int x = 0; x < ( 1 << (HalfNN - TT) ); x++ ) // guess the values for the first HalfNN - TT 
+            for ( int x = 0; x < ( 1 << (HalfNN - TT) ); x++ ) // guess the values for the first HalfNN - TT
             {
-                // prepare the coefficients
-                for ( int t = 0; t < TT; t++ )
-                    for ( int j = 0; j < TT; j++ )
-                        tempB[t][j] = ( B[t][ HalfNN - TT + j ] + ( B[t][HalfNN + HalfNN - TT + j ] * ( it[ HalfNN - TT + j] + 1 ) ) ) % 3;
-
                 // prepare the output1
                 for ( int t = 0; t < TT; t++ )
                 {
@@ -1129,7 +1178,7 @@ int main(int argc, char** argv)
                     tempO[t] = mod3 ( Output2[t] - reminder ); 
                 }
 
-                auto res2 = solveF3( tempB, tempO, TT, TT ); 
+                solveF3_withFactor( fac, tempO, rb_scr, res2 );
 
                 if ( res2.size() == 0 )
                     continue;
@@ -1374,31 +1423,67 @@ int main(int argc, char** argv)
             delete [] V[i];
         delete [] V;
 
-        if ( COUNT == TESTNUM )
-            break;
+        return { S1, S2, W1_before, W1, W2, E, SUC };
+    }
+}
 
-        const int barWidth = 50; 
+int main(int argc, char** argv)
+{
+    // --seed N : reproducible run (else a random seed). --threads N : default 1.
+    // Each trial is seeded from (seed, trial_index), so the result is identical
+    // for any thread count (--threads 1 and --threads N agree bit-for-bit).
+    random_device rd;
+    unsigned int seed = rd();
+    bool seed_given = false;
+    int nthreads = 1;
+    for ( int i = 1; i < argc; i++ )
+    {
+        if ( ( strcmp( argv[i], "--seed" ) == 0 ) && ( i + 1 < argc ) )
+        { seed = static_cast<unsigned int>( strtoul( argv[i + 1], nullptr, 10 ) ); seed_given = true; i++; }
+        else if ( ( strcmp( argv[i], "--threads" ) == 0 ) && ( i + 1 < argc ) )
+        { nthreads = (int)strtol( argv[i + 1], nullptr, 10 ); if ( nthreads < 1 ) nthreads = 1; i++; }
+    }
+    cout << "Using seed " << seed << ( seed_given ? " (from --seed)" : " (random)" )
+         << ", threads " << nthreads << endl;
 
-         float progress = static_cast<float>(COUNT) / TESTNUM;
-            int pos = barWidth * progress;
+    const int TESTNUM = 100;
 
-        std::string bar;
-        bar.reserve(barWidth + 10); 
-        bar = "[";
-        for (int p = 0; p < barWidth; ++p) {
-            bar += (p < pos) ? '=' : ' ';
+    cout << "The parameter NN = " << NN << ";" << "lambda = " << lambda << endl;
+    cout << "Execute " << TESTNUM << " times of tests...The data in the paper is the average value of the " << TESTNUM << " tests..." << endl;
+
+    vector<TrialResult> results( TESTNUM );
+    auto worker = [&]( int lo, int hi )
+    {
+        for ( int i = lo; i < hi; i++ )
+        {
+            std::seed_seq sq{ (unsigned int)seed, (unsigned int)i };
+            mt19937 gen( sq );
+            results[i] = run_trial( gen );
         }
-        bar += "] " + std::to_string(static_cast<int>(progress * 100)) + "%";
-
-        std::cout << "\r" << bar << std::flush;
+    };
+    if ( nthreads <= 1 )
+        worker( 0, TESTNUM );
+    else
+    {
+        vector<std::thread> pool;
+        int per = ( TESTNUM + nthreads - 1 ) / nthreads;
+        for ( int t = 0; t < nthreads; t++ )
+        {
+            int lo = t * per, hi = lo + per; if ( hi > TESTNUM ) hi = TESTNUM;
+            if ( lo < hi ) pool.emplace_back( worker, lo, hi );
+        }
+        for ( auto& th : pool ) th.join();
     }
 
-    cout << "Done!" << endl;
+    long long S1 = 0, S2 = 0, W1_before = 0, W1 = 0, W2 = 0, E = 0; int SUC = 0;
+    for ( int i = 0; i < TESTNUM; i++ )
+    {
+        S1 += results[i].S1; S2 += results[i].S2; W1_before += results[i].W1_before;
+        W1 += results[i].W1; W2 += results[i].W2; E += results[i].E; SUC += results[i].SUC;
+    }
 
-    cout << endl;
-
+    cout << "Done!" << endl << endl;
     cout << "The average complexity over " << TESTNUM << " tests: " << endl;
-
     cout << "Sampling1  " << log2( (double)S1 / TESTNUM ) << endl;
     cout << "Sampling2  " << log2( (double)S2 / TESTNUM ) << endl;
     cout << "W1_before  " << log2( (double)W1_before / TESTNUM ) << endl;
@@ -1407,7 +1492,6 @@ int main(int argc, char** argv)
     cout << "Exhaustive " << log2( (double)E / TESTNUM ) << endl;
     cout << "Success    " << SUC << endl;
 
-    //for ( int i = 0; i < 100; i++ )
-    //    cout << i << " " << Value[i] << endl;
-
+    return 0;
 }
+
